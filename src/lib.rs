@@ -23,6 +23,7 @@ pub struct Tas<T: Tasable> {
     save_file: String,
     replay: Option<Replay>,
     initial_state: T::Saved,
+    acc_delta_time: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,7 @@ impl<T: Tasable> Tas<T> {
             replay: None,
             initial_state: game.save(),
             game,
+            acc_delta_time: 0.0,
         }
     }
 
@@ -140,42 +142,47 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
         self.game.draw(framebuffer);
     }
 
-    fn update(&mut self, delta_time: f64) {
-        if !self.paused {
-            if let Some(replay) = &mut self.replay {
-                replay.time += delta_time;
-                while replay.next_input < replay.inputs.len()
-                    && replay.inputs[replay.next_input].time <= replay.time
-                {
-                    self.game
-                        .handle_event(replay.inputs[replay.next_input].event.clone());
-                    replay.next_input += 1;
-                }
-            }
-
-            let delta_time = delta_time * self.time_scale;
-            self.time += delta_time;
-            self.game.update(delta_time);
-
-            if let Some(time) = &mut self.next_fixed_update {
-                // Simulate fixed updates manually
-                *time -= delta_time;
-                let mut updates = 0;
-                while *time <= 0.0 {
-                    *time += self.fixed_delta_time;
-                    updates += 1;
-                }
-                for _ in 0..updates {
-                    self.game.fixed_update(self.fixed_delta_time);
-                }
-            }
-        }
-    }
+    fn update(&mut self, _delta_time: f64) {}
 
     fn fixed_update(&mut self, delta_time: f64) {
         self.fixed_delta_time = delta_time;
         if self.next_fixed_update.is_none() {
             self.next_fixed_update = Some(delta_time);
+        }
+
+        if !self.paused {
+            let mut play_time = self.acc_delta_time + delta_time * self.time_scale;
+            while play_time >= delta_time {
+                if let Some(replay) = &mut self.replay {
+                    replay.time += delta_time;
+                    while replay.next_input < replay.inputs.len()
+                        && replay.inputs[replay.next_input].time <= replay.time
+                    {
+                        self.game
+                            .handle_event(replay.inputs[replay.next_input].event.clone());
+                        replay.next_input += 1;
+                    }
+                }
+
+                self.time += delta_time;
+                self.game.update(delta_time);
+
+                if let Some(time) = &mut self.next_fixed_update {
+                    // Simulate fixed updates manually
+                    *time -= delta_time;
+                    let mut updates = 0;
+                    while *time <= 0.0 {
+                        *time += self.fixed_delta_time;
+                        updates += 1;
+                    }
+                    for _ in 0..updates {
+                        self.game.fixed_update(self.fixed_delta_time);
+                    }
+                }
+
+                play_time -= delta_time;
+            }
+            self.acc_delta_time = play_time;
         }
     }
 
@@ -194,6 +201,10 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                     _ => {}
                 }
             }
+            return;
+        }
+
+        if self.replay.is_some() {
             return;
         }
 
