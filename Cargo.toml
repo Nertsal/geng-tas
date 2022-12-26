@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 geng = { git = "https://github.com/kuviman/geng" }
+serde = { version = "1.0.151", features = ["derive"] }
