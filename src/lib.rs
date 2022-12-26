@@ -24,7 +24,6 @@ pub struct Tas<T: Tasable> {
     replay: Option<Replay>,
     initial_state: T::Saved,
     acc_delta_time: f64,
-    last_input_time: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,18 +34,17 @@ struct SavedTas<S> {
 
 struct Replay {
     time: f64,
-    last_input_time: f64,
     inputs: Vec<TickInput>,
     next_input: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TickInput {
-    delay: f64,
+    time: f64,
     event: geng::Event,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SaveState<S> {
     time: f64,
     inputs: Vec<TickInput>,
@@ -67,7 +65,7 @@ pub trait Tasable {
 
 impl<T: Tasable> Tas<T> {
     pub fn new(game: T, geng: &Geng) -> Self {
-        Self {
+        let mut tas = Self {
             geng: geng.clone(),
             show_ui: true,
             time_scale: 1.0,
@@ -82,8 +80,9 @@ impl<T: Tasable> Tas<T> {
             initial_state: game.save(),
             game,
             acc_delta_time: 0.0,
-            last_input_time: 0.0,
-        }
+        };
+        tas.load_savestates().expect("Failed to load saved states");
+        tas
     }
 
     /// Saves the current game state.
@@ -93,6 +92,9 @@ impl<T: Tasable> Tas<T> {
             inputs: self.inputs.clone(),
             state: self.game.save(),
         });
+        if let Err(err) = self.save_savestates() {
+            error!("Failed to save states: {err}");
+        }
     }
 
     /// Attempts to load the saved state by index.
@@ -133,10 +135,23 @@ impl<T: Tasable> Tas<T> {
         self.game.load(saved.initial_state);
         self.replay = Some(Replay {
             time: 0.0,
-            last_input_time: 0.0,
             inputs: saved.inputs,
             next_input: 0,
         });
+        Ok(())
+    }
+
+    fn save_savestates(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let file = std::fs::File::create("savedstates.json")?;
+        let writer = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &self.saved_states)?;
+        Ok(())
+    }
+
+    fn load_savestates(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let file = std::fs::File::open("savedstates.json")?;
+        let reader = std::io::BufReader::new(file);
+        self.saved_states = serde_json::from_reader(reader)?;
         Ok(())
     }
 }
@@ -160,12 +175,10 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                 if let Some(replay) = &mut self.replay {
                     replay.time += delta_time;
                     while replay.next_input < replay.inputs.len()
-                        && replay.last_input_time + replay.inputs[replay.next_input].delay
-                            <= replay.time
+                        && replay.inputs[replay.next_input].time <= replay.time
                     {
                         self.game
                             .handle_event(replay.inputs[replay.next_input].event.clone());
-                        replay.last_input_time += replay.inputs[replay.next_input].delay;
                         replay.next_input += 1;
                     }
                 }
@@ -215,10 +228,9 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
         }
 
         self.inputs.push(TickInput {
-            delay: self.time - self.last_input_time,
+            time: self.time,
             event: event.clone(),
         });
-        self.last_input_time = self.time;
         self.game.handle_event(event);
     }
 
@@ -286,7 +298,7 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
             },
             column![
                 {
-                    let time_slider = slider::Slider::new(ui, self.time_scale, 0.0..=2.0);
+                    let time_slider = slider::Slider::new(ui, self.time_scale, 0.0..=10.0);
                     if let Some(value) = time_slider.get_change() {
                         self.time_scale = value;
                     }
@@ -321,6 +333,7 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                     {
                         let load_run = Button::new(ui, "Start replay");
                         if load_run.was_clicked() {
+                            println!("The evil button");
                             if let Err(err) = self.load_run(&self.save_file.clone()) {
                                 error!("Failed to load run: {err}");
                             }
@@ -340,7 +353,8 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                 }) as Box<dyn Widget>);
                 saved_states
             })
-            .align(vec2(1.0, 0.5))
+            .align(vec2(1.0, 0.0))
+            .padding_bottom(200.0)
         ]
         .uniform_padding(30.0);
 
