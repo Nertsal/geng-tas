@@ -24,6 +24,7 @@ pub struct Tas<T: Tasable> {
     replay: Option<Replay>,
     initial_state: T::Saved,
     acc_delta_time: f64,
+    last_input_time: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,13 +35,14 @@ struct SavedTas<S> {
 
 struct Replay {
     time: f64,
+    last_input_time: f64,
     inputs: Vec<TickInput>,
     next_input: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TickInput {
-    time: f64,
+    delay: f64,
     event: geng::Event,
 }
 
@@ -80,6 +82,7 @@ impl<T: Tasable> Tas<T> {
             initial_state: game.save(),
             game,
             acc_delta_time: 0.0,
+            last_input_time: 0.0,
         }
     }
 
@@ -130,6 +133,7 @@ impl<T: Tasable> Tas<T> {
         self.game.load(saved.initial_state);
         self.replay = Some(Replay {
             time: 0.0,
+            last_input_time: 0.0,
             inputs: saved.inputs,
             next_input: 0,
         });
@@ -156,10 +160,12 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                 if let Some(replay) = &mut self.replay {
                     replay.time += delta_time;
                     while replay.next_input < replay.inputs.len()
-                        && replay.inputs[replay.next_input].time <= replay.time
+                        && replay.last_input_time + replay.inputs[replay.next_input].delay
+                            <= replay.time
                     {
                         self.game
                             .handle_event(replay.inputs[replay.next_input].event.clone());
+                        replay.last_input_time += replay.inputs[replay.next_input].delay;
                         replay.next_input += 1;
                     }
                 }
@@ -209,9 +215,10 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
         }
 
         self.inputs.push(TickInput {
-            time: self.time,
+            delay: self.time - self.last_input_time,
             event: event.clone(),
         });
+        self.last_input_time = self.time;
         self.game.handle_event(event);
     }
 
