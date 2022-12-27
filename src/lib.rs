@@ -24,6 +24,7 @@ pub struct Tas<T: Tasable> {
     replay: Option<Replay>,
     initial_state: T::Saved,
     acc_delta_time: f64,
+    queued_inputs: Vec<geng::Event>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +81,7 @@ impl<T: Tasable> Tas<T> {
             initial_state: game.save(),
             game,
             acc_delta_time: 0.0,
+            queued_inputs: Vec::new(),
         };
         tas.load_savestates().expect("Failed to load saved states");
         tas
@@ -100,6 +102,9 @@ impl<T: Tasable> Tas<T> {
     /// Attempts to load the saved state by index.
     /// If such a state is not found, nothing happens.
     fn load_state(&mut self, index: usize) {
+        // Stop replay
+        self.replay.take();
+
         // Get the state by index
         if let Some(state) = self.saved_states.get(index) {
             let state = state.clone();
@@ -166,26 +171,18 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
     fn fixed_update(&mut self, delta_time: f64) {
         self.fixed_delta_time = delta_time;
         if self.next_fixed_update.is_none() {
-            self.next_fixed_update = Some(delta_time);
+            self.next_fixed_update = Some(dbg!(delta_time));
         }
 
         if !self.paused {
-            let mut play_time = self.acc_delta_time + delta_time * self.time_scale;
-            while play_time >= delta_time {
-                if let Some(replay) = &mut self.replay {
-                    replay.time += delta_time;
-                    while replay.next_input < replay.inputs.len()
-                        && replay.inputs[replay.next_input].time <= replay.time
-                    {
-                        self.game
-                            .handle_event(replay.inputs[replay.next_input].event.clone());
-                        replay.next_input += 1;
-                    }
-                }
-
+            let mut sim_time = self.acc_delta_time + delta_time * self.time_scale;
+            while sim_time >= delta_time {
                 self.time += delta_time;
+
+                // Update
                 self.game.update(delta_time);
 
+                // Fixed update
                 if let Some(time) = &mut self.next_fixed_update {
                     // Simulate fixed updates manually
                     *time -= delta_time;
@@ -199,9 +196,31 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                     }
                 }
 
-                play_time -= delta_time;
+                // Handle event
+                if let Some(replay) = &mut self.replay {
+                    // Replay
+                    replay.time += delta_time;
+                    while replay.next_input < replay.inputs.len()
+                        && replay.inputs[replay.next_input].time <= replay.time
+                    {
+                        self.game
+                            .handle_event(replay.inputs[replay.next_input].event.clone());
+                        replay.next_input += 1;
+                    }
+                } else {
+                    // Realtime
+                    for event in self.queued_inputs.drain(..) {
+                        self.inputs.push(TickInput {
+                            time: self.time - delta_time / 2.0,
+                            event: event.clone(),
+                        });
+                        self.game.handle_event(event);
+                    }
+                }
+
+                sim_time -= delta_time;
             }
-            self.acc_delta_time = play_time;
+            self.acc_delta_time = sim_time;
         }
     }
 
@@ -227,11 +246,7 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
             return;
         }
 
-        self.inputs.push(TickInput {
-            time: self.time,
-            event: event.clone(),
-        });
-        self.game.handle_event(event);
+        self.queued_inputs.push(event);
     }
 
     fn ui<'a>(&'a mut self, ui: &'a geng::ui::Controller) -> Box<dyn geng::ui::Widget + 'a> {
@@ -246,6 +261,7 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
             .saved_states
             .iter()
             .enumerate()
+            .skip(15)
             .map(|(i, _)| {
                 Box::new(
                     row![
