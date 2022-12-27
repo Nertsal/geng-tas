@@ -261,7 +261,6 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
             .saved_states
             .iter()
             .enumerate()
-            .skip(15)
             .map(|(i, _)| {
                 Box::new(
                     row![
