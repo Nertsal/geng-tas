@@ -384,7 +384,7 @@ mod slider {
     pub struct Slider<'a> {
         cx: &'a Controller,
         sense: &'a mut Sense,
-        pos: &'a mut Option<AABB<f64>>,
+        pos: &'a mut Option<Aabb2<f64>>,
         tick_radius: &'a mut f32,
         value: f64,
         range: RangeInclusive<f64>,
@@ -442,7 +442,7 @@ mod slider {
                 cx.framebuffer,
                 &geng::PixelPerfectCamera,
                 &draw_2d::Quad::new(
-                    AABB::from_corners(
+                    Aabb2::from_corners(
                         position.bottom_left()
                             + vec2(value_position, (position.height() - line_width) / 2.0),
                         position.top_right()
@@ -462,7 +462,7 @@ mod slider {
                 cx.framebuffer,
                 &geng::PixelPerfectCamera,
                 &draw_2d::Quad::new(
-                    AABB::from_corners(
+                    Aabb2::from_corners(
                         position.bottom_left()
                             + vec2(line_width / 2.0, (position.height() - line_width) / 2.0),
                         position.bottom_left()
@@ -497,7 +497,7 @@ mod slider {
                 if let geng::Event::MouseDown { position, .. }
                 | geng::Event::MouseMove { position, .. } = &event
                 {
-                    let position = position.x - aabb.x_min;
+                    let position = position.x - aabb.min.x;
                     let new_value = *self.range.start()
                         + ((position - aabb.height() / 6.0) / (aabb.width() - aabb.height() / 3.0))
                             .clamp(0.0, 1.0)
