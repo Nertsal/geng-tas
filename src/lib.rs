@@ -22,37 +22,42 @@ pub struct Tas<T: Tasable> {
     /// Current simulation (not real) time.
     time: f64,
     /// History of all inputs.
-    inputs: Vec<TickInput>,
+    inputs: Vec<FrameInput<geng::Event>>,
     save_file: String,
-    replay: Option<Replay>,
+    replay: Option<Replay<geng::Event>>,
     initial_state: T::Saved,
     acc_delta_time: f64,
     queued_inputs: Vec<geng::Event>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SavedTas<S> {
-    initial_state: S,
-    inputs: Vec<TickInput>,
+struct SavedTas<T> {
+    initial_state: T,
+    inputs: Vec<FrameInput<geng::Event>>,
 }
 
-struct Replay {
-    time: f64,
-    inputs: Vec<TickInput>,
+struct Replay<T> {
+    /// Current frame index.
+    frame: usize,
+    /// Current input index.
+    input: usize,
+    /// The amount of frames until next input should be taken.
     next_input: usize,
+    inputs: Vec<FrameInput<T>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TickInput {
-    time: f64,
-    event: geng::Event,
+struct FrameInput<T> {
+    /// How long should these inputs be replayed for.
+    frames: usize,
+    inputs: Vec<T>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct SaveState<S> {
+struct SaveState<T> {
     time: f64,
-    inputs: Vec<TickInput>,
-    state: S,
+    inputs: Vec<FrameInput<geng::Event>>,
+    state: T,
 }
 
 /// Holds the implementation details of the game to be TAS'ed.
@@ -67,7 +72,7 @@ pub trait Tasable {
     fn load(&mut self, state: Self::Saved);
 }
 
-impl<T: Tasable> Tas<T> {
+impl<T: geng::State + Tasable> Tas<T> {
     pub fn new(game: T, geng: &Geng) -> Self {
         let mut tas = Self {
             geng: geng.clone(),
@@ -125,7 +130,7 @@ impl<T: Tasable> Tas<T> {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
-        let saved = SavedTas {
+        let saved = SavedTas::<T::Saved> {
             initial_state: self.initial_state.clone(),
             inputs: self.inputs.clone(),
         };
@@ -141,11 +146,15 @@ impl<T: Tasable> Tas<T> {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let saved: SavedTas<T::Saved> = serde_json::from_reader(reader)?;
+
         self.game.load(saved.initial_state);
+        self.time = 0.0;
+        self.inputs.clear();
         self.replay = Some(Replay {
-            time: 0.0,
+            frame: 0,
+            input: 0,
+            next_input: saved.inputs.first().map(|input| input.frames).unwrap_or(0),
             inputs: saved.inputs,
-            next_input: 0,
         });
         Ok(())
     }
@@ -167,6 +176,51 @@ impl<T: Tasable> Tas<T> {
         self.saved_states = serde_json::from_reader(reader)?;
         Ok(())
     }
+
+    /// Plays the next frame (either in replay or record mode).
+    fn next_frame(&mut self) {
+        // Handle event
+        if let Some(replay) = &mut self.replay {
+            // Replay
+            if replay.input < replay.inputs.len() {
+                let input = &replay.inputs[replay.input];
+                for input in &input.inputs {
+                    self.game.handle_event(input.clone());
+                }
+
+                // Get next input
+                replay.next_input = replay.next_input.saturating_sub(1);
+                if replay.next_input == 0 {
+                    replay.input += 1;
+                    if let Some(next) = replay.inputs.get(replay.input) {
+                        replay.next_input = next.frames;
+                    }
+                }
+
+                replay.frame += 1;
+            } else {
+                self.paused = true;
+                // TODO: indicate that the replay has ended or smth
+            }
+        } else {
+            // Record
+            let inputs = std::mem::take(&mut self.queued_inputs);
+            for event in &inputs {
+                self.game.handle_event(event.clone());
+            }
+            if let Some(last) = self.inputs.last_mut().filter(|last| last.inputs == inputs) {
+                // Extend last input
+                last.frames += 1;
+            } else {
+                // Create new input
+                self.inputs.push(FrameInput { frames: 1, inputs });
+            }
+        }
+
+        // Update
+        self.game.update(self.fixed_delta_time);
+        self.game.fixed_update(self.fixed_delta_time);
+    }
 }
 
 impl<T: geng::State + Tasable> geng::State for Tas<T> {
@@ -180,7 +234,7 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
     fn fixed_update(&mut self, delta_time: f64) {
         self.fixed_delta_time = delta_time;
         if self.next_fixed_update.is_none() {
-            self.next_fixed_update = Some(dbg!(delta_time));
+            self.next_fixed_update = Some(delta_time);
         }
 
         if !self.paused {
@@ -188,10 +242,6 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
             while sim_time >= delta_time {
                 self.time += delta_time;
 
-                // Update
-                self.game.update(delta_time);
-
-                // Fixed update
                 if let Some(time) = &mut self.next_fixed_update {
                     // Simulate fixed updates manually
                     *time -= delta_time;
@@ -201,29 +251,7 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                         updates += 1;
                     }
                     for _ in 0..updates {
-                        self.game.fixed_update(self.fixed_delta_time);
-                    }
-                }
-
-                // Handle event
-                if let Some(replay) = &mut self.replay {
-                    // Replay
-                    replay.time += delta_time;
-                    while replay.next_input < replay.inputs.len()
-                        && replay.inputs[replay.next_input].time <= replay.time
-                    {
-                        self.game
-                            .handle_event(replay.inputs[replay.next_input].event.clone());
-                        replay.next_input += 1;
-                    }
-                } else {
-                    // Realtime
-                    for event in self.queued_inputs.drain(..) {
-                        self.inputs.push(TickInput {
-                            time: self.time - delta_time / 2.0,
-                            event: event.clone(),
-                        });
-                        self.game.handle_event(event);
+                        self.next_frame();
                     }
                 }
 
@@ -316,13 +344,17 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
         }
 
         let tas_ui = stack![
-            if self.paused {
-                text("Paused".to_string(), text_size)
-                    .align(vec2(1.0, 0.9))
-                    .boxed()
-            } else {
-                Void.boxed()
-            },
+            text(
+                if self.paused {
+                    "Paused".to_string()
+                } else if let Some(replay) = &self.replay {
+                    format!("Replay frame {}", replay.frame)
+                } else {
+                    "Recording".to_string()
+                },
+                text_size
+            )
+            .align(vec2(1.0, 0.9)),
             slider("Time scale", 0.0..=10.0, &mut self.time_scale, text_size).align(vec2(0.5, 1.0)),
             column![
                 text(self.save_file.clone(), text_size),
