@@ -13,14 +13,14 @@ pub struct Tas<T: Tasable> {
     /// Multiplier for `delta_time`, used for slow-motion.
     time_scale: f64,
     paused: bool,
+    /// Paused when pressing the LAlt key.
+    auto_paused: bool,
     /// The expected time between fixed updates.
     fixed_delta_time: f64,
-    /// The time until the next fixed update (if queued).
-    next_fixed_update: Option<f64>,
     /// All saved states.
     saved_states: Vec<SaveState<T::Saved>>,
-    /// Current simulation (not real) time.
-    time: f64,
+    /// Current simulation frame.
+    frame: usize,
     /// History of all inputs.
     inputs: Vec<FrameInput<geng::Event>>,
     save_file: String,
@@ -28,6 +28,10 @@ pub struct Tas<T: Tasable> {
     initial_state: T::Saved,
     acc_delta_time: f64,
     queued_inputs: Vec<geng::Event>,
+    /// All pressed keyboard keys in the simulation.
+    pressed_keys: HashSet<geng::Key>,
+    /// All pressed mouse buttons in the simulation.
+    pressed_buttons: HashSet<geng::MouseButton>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,8 +59,11 @@ struct FrameInput<T> {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SaveState<T> {
-    time: f64,
+    frame: usize,
     inputs: Vec<FrameInput<geng::Event>>,
+    pressed_keys: HashSet<geng::Key>,
+    pressed_buttons: HashSet<geng::MouseButton>,
+    initial_state: T,
     state: T,
 }
 
@@ -80,10 +87,10 @@ impl<T: geng::State + Tasable> Tas<T> {
             show_ui: true,
             time_scale: 1.0,
             paused: true,
+            auto_paused: false,
             fixed_delta_time: 1.0,
-            next_fixed_update: None,
             saved_states: Vec::new(),
-            time: 0.0,
+            frame: 0,
             inputs: Vec::new(),
             save_file: "tas.json".to_string(),
             replay: None,
@@ -91,6 +98,8 @@ impl<T: geng::State + Tasable> Tas<T> {
             game,
             acc_delta_time: 0.0,
             queued_inputs: Vec::new(),
+            pressed_keys: HashSet::new(),
+            pressed_buttons: HashSet::new(),
         };
         tas.load_savestates().expect("Failed to load saved states");
         tas
@@ -99,9 +108,12 @@ impl<T: geng::State + Tasable> Tas<T> {
     /// Saves the current game state.
     fn save_state(&mut self) {
         self.saved_states.push(SaveState {
-            time: self.time,
+            frame: self.frame,
             inputs: self.inputs.clone(),
+            initial_state: self.initial_state.clone(),
             state: self.game.save(),
+            pressed_keys: self.pressed_keys.clone(),
+            pressed_buttons: self.pressed_buttons.clone(),
         });
         if let Err(err) = self.save_savestates() {
             error!("Failed to save states: {err}");
@@ -117,8 +129,11 @@ impl<T: geng::State + Tasable> Tas<T> {
         // Get the state by index
         if let Some(state) = self.saved_states.get(index) {
             let state = state.clone();
-            self.time = state.time;
+            self.frame = state.frame;
             self.inputs = state.inputs;
+            self.pressed_keys = state.pressed_keys;
+            self.pressed_buttons = state.pressed_buttons;
+            self.initial_state = state.initial_state;
             self.game.load(state.state);
         }
     }
@@ -148,8 +163,11 @@ impl<T: geng::State + Tasable> Tas<T> {
         let saved: SavedTas<T::Saved> = serde_json::from_reader(reader)?;
 
         self.game.load(saved.initial_state);
-        self.time = 0.0;
+        self.frame = 0;
+        self.queued_inputs.clear();
         self.inputs.clear();
+        self.pressed_keys.clear();
+        self.pressed_buttons.clear();
         self.replay = Some(Replay {
             frame: 0,
             input: 0,
@@ -179,15 +197,52 @@ impl<T: geng::State + Tasable> Tas<T> {
 
     /// Plays the next frame (either in replay or record mode).
     fn next_frame(&mut self) {
-        // Handle event
-        if let Some(replay) = &mut self.replay {
-            // Replay
-            if replay.input < replay.inputs.len() {
-                let input = &replay.inputs[replay.input];
-                for input in &input.inputs {
-                    self.game.handle_event(input.clone());
+        // Get frame inputs
+        let inputs = if let Some(replay) = &self.replay {
+            match replay.inputs.get(replay.input) {
+                Some(inputs) => &inputs.inputs,
+                None => {
+                    // TODO: indicate that the replay has ended or smth
+                    self.paused = true;
+                    return;
                 }
+            }
+        } else {
+            &self.queued_inputs
+        };
 
+        // Simulate inputs
+        for input in inputs {
+            // Update pressed states
+            match input {
+                geng::Event::KeyDown { key } => {
+                    self.pressed_keys.insert(*key);
+                }
+                geng::Event::KeyUp { key } => {
+                    self.pressed_keys.remove(key);
+                }
+                geng::Event::MouseDown { button, .. } => {
+                    self.pressed_buttons.insert(*button);
+                }
+                geng::Event::MouseUp { button, .. } => {
+                    self.pressed_buttons.remove(button);
+                }
+                _ => {}
+            }
+            // Sync pressed states
+            self.geng
+                .window()
+                .set_pressed_keys(self.pressed_keys.clone());
+            self.geng
+                .window()
+                .set_pressed_buttons(self.pressed_buttons.clone());
+
+            self.game.handle_event(input.clone());
+        }
+
+        // Update inputs
+        if let Some(replay) = &mut self.replay {
+            if replay.input < replay.inputs.len() {
                 // Get next input
                 replay.next_input = replay.next_input.saturating_sub(1);
                 if replay.next_input == 0 {
@@ -198,16 +253,10 @@ impl<T: geng::State + Tasable> Tas<T> {
                 }
 
                 replay.frame += 1;
-            } else {
-                self.paused = true;
-                // TODO: indicate that the replay has ended or smth
             }
         } else {
-            // Record
+            // Record the inputs
             let inputs = std::mem::take(&mut self.queued_inputs);
-            for event in &inputs {
-                self.game.handle_event(event.clone());
-            }
             if let Some(last) = self.inputs.last_mut().filter(|last| last.inputs == inputs) {
                 // Extend last input
                 last.frames += 1;
@@ -220,6 +269,7 @@ impl<T: geng::State + Tasable> Tas<T> {
         // Update
         self.game.update(self.fixed_delta_time);
         self.game.fixed_update(self.fixed_delta_time);
+        self.frame += 1;
     }
 }
 
@@ -233,45 +283,51 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
 
     fn fixed_update(&mut self, delta_time: f64) {
         self.fixed_delta_time = delta_time;
-        if self.next_fixed_update.is_none() {
-            self.next_fixed_update = Some(delta_time);
-        }
-
-        if !self.paused {
+        if !self.paused && !self.auto_paused {
             let mut sim_time = self.acc_delta_time + delta_time * self.time_scale;
-            while sim_time >= delta_time {
-                self.time += delta_time;
-
-                if let Some(time) = &mut self.next_fixed_update {
-                    // Simulate fixed updates manually
-                    *time -= delta_time;
-                    let mut updates = 0;
-                    while *time <= 0.0 {
-                        *time += self.fixed_delta_time;
-                        updates += 1;
-                    }
-                    for _ in 0..updates {
-                        self.next_frame();
-                    }
-                }
-
-                sim_time -= delta_time;
+            while sim_time >= self.fixed_delta_time {
+                sim_time -= self.fixed_delta_time;
+                self.next_frame();
             }
             self.acc_delta_time = sim_time;
         }
     }
 
     fn handle_event(&mut self, event: geng::Event) {
-        let window = self.geng.window();
-        if window.is_key_pressed(geng::Key::LAlt) {
+        if let geng::Event::KeyDown {
+            key: geng::Key::LAlt,
+        } = event
+        {
+            self.auto_paused = true;
+        }
+        if let geng::Event::KeyUp {
+            key: geng::Key::LAlt,
+        } = event
+        {
+            self.auto_paused = false;
+        }
+
+        if self.auto_paused {
             // Capture the event
             if let geng::Event::KeyDown { key } = event {
                 match key {
                     geng::Key::S => {
                         self.save_run("tas.json").unwrap();
                     }
+                    geng::Key::K => {
+                        self.save_state();
+                    }
+                    geng::Key::L if !self.saved_states.is_empty() => {
+                        self.load_state(self.saved_states.len() - 1);
+                    }
                     geng::Key::P => {
                         self.paused = !self.paused;
+                    }
+                    geng::Key::Left => {
+                        self.time_scale = (self.time_scale - 0.05).max(0.0);
+                    }
+                    geng::Key::Right => {
+                        self.time_scale += 0.05;
                     }
                     _ => {}
                 }
