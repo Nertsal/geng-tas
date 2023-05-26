@@ -116,7 +116,7 @@ impl<T: geng::State + Tasable> Tas<T> {
             pressed_buttons: self.pressed_buttons.clone(),
         });
         if let Err(err) = self.save_savestates() {
-            error!("Failed to save states: {err}");
+            log::error!("Failed to save states: {err}");
         }
     }
 
@@ -186,7 +186,7 @@ impl<T: geng::State + Tasable> Tas<T> {
 
     fn load_savestates(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let Ok(file) = std::fs::File::open("savedstates.json") else {
-            warn!("Failed to open savedstates.json");
+            log::warn!("Failed to open savedstates.json");
             self.saved_states = default();
             return Ok(());
         };
@@ -417,12 +417,12 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                 row![
                     button!("Save run" => {
                         if let Err(err) = self.save_run(&self.save_file) {
-                            error!("Failed to save run: {err}");
+                            log::error!("Failed to save run: {err}");
                         }
                     }),
                     button!("Start replay" => {
                         if let Err(err) = self.load_run(&self.save_file.clone()) {
-                            error!("Failed to load run: {err}");
+                            log::error!("Failed to load run: {err}");
                         }
                     }),
                 ]
