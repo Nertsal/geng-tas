@@ -19,13 +19,17 @@ pub struct Tas<T: Tasable> {
     fixed_delta_time: f64,
     /// All saved states.
     saved_states: Vec<SaveState<T::Saved>>,
+    /// The state that is loaded on <C-l>.
+    selected_state: usize,
     /// Current simulation frame.
     frame: usize,
     /// History of all inputs.
     inputs: Vec<FrameInput<geng::Event>>,
+    /// History of all states.
+    states: Vec<T::Saved>,
     save_file: String,
-    replay: Option<Replay<geng::Event>>,
-    initial_state: T::Saved,
+    replay: Option<Replay<T::Saved>>,
+    // initial_state: T::Saved,
     acc_delta_time: f64,
     queued_inputs: Vec<geng::Event>,
     /// All pressed keyboard keys in the simulation.
@@ -36,18 +40,20 @@ pub struct Tas<T: Tasable> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedTas<T> {
-    initial_state: T,
+    // initial_state: T,
+    states: Vec<T>,
     inputs: Vec<FrameInput<geng::Event>>,
 }
 
 struct Replay<T> {
     /// Current frame index.
     frame: usize,
+    states: Vec<T>,
     /// Current input index.
     input: usize,
     /// The amount of frames until next input should be taken.
     next_input: usize,
-    inputs: Vec<FrameInput<T>>,
+    inputs: Vec<FrameInput<geng::Event>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,11 +66,12 @@ struct FrameInput<T> {
 #[derive(Clone, Serialize, Deserialize)]
 struct SaveState<T> {
     frame: usize,
+    states: Vec<T>,
     inputs: Vec<FrameInput<geng::Event>>,
     pressed_keys: HashSet<geng::Key>,
     pressed_buttons: HashSet<geng::MouseButton>,
-    initial_state: T,
-    state: T,
+    // initial_state: T,
+    // state: T,
 }
 
 /// Holds the implementation details of the game to be TAS'ed.
@@ -90,11 +97,13 @@ impl<T: geng::State + Tasable> Tas<T> {
             auto_paused: false,
             fixed_delta_time: 1.0,
             saved_states: Vec::new(),
+            selected_state: 0,
             frame: 0,
             inputs: Vec::new(),
+            states: vec![game.save()],
             save_file: "tas.json".to_string(),
             replay: None,
-            initial_state: game.save(),
+            // initial_state: game.save(),
             game,
             acc_delta_time: 0.0,
             queued_inputs: Vec::new(),
@@ -109,9 +118,10 @@ impl<T: geng::State + Tasable> Tas<T> {
     fn save_state(&mut self) {
         self.saved_states.push(SaveState {
             frame: self.frame,
+            states: self.states.clone(),
             inputs: self.inputs.clone(),
-            initial_state: self.initial_state.clone(),
-            state: self.game.save(),
+            // initial_state: self.initial_state.clone(),
+            // state: self.game.save(),
             pressed_keys: self.pressed_keys.clone(),
             pressed_buttons: self.pressed_buttons.clone(),
         });
@@ -129,12 +139,14 @@ impl<T: geng::State + Tasable> Tas<T> {
         // Get the state by index
         if let Some(state) = self.saved_states.get(index) {
             let state = state.clone();
+            self.game.load(state.states.last().unwrap().clone());
             self.frame = state.frame;
+            self.states = state.states;
             self.inputs = state.inputs;
             self.pressed_keys = state.pressed_keys;
             self.pressed_buttons = state.pressed_buttons;
-            self.initial_state = state.initial_state;
-            self.game.load(state.state);
+            // self.initial_state = state.initial_state;
+            // self.game.load(state.state);
         }
     }
 
@@ -146,7 +158,8 @@ impl<T: geng::State + Tasable> Tas<T> {
         let file = std::fs::File::create(path)?;
         let writer = std::io::BufWriter::new(file);
         let saved = SavedTas::<T::Saved> {
-            initial_state: self.initial_state.clone(),
+            // initial_state: self.initial_state.clone(),
+            states: self.states.clone(),
             inputs: self.inputs.clone(),
         };
         serde_json::to_writer_pretty(writer, &saved)?;
@@ -162,14 +175,16 @@ impl<T: geng::State + Tasable> Tas<T> {
         let reader = std::io::BufReader::new(file);
         let saved: SavedTas<T::Saved> = serde_json::from_reader(reader)?;
 
-        self.game.load(saved.initial_state);
+        self.game.load(saved.states.first().unwrap().clone());
         self.frame = 0;
         self.queued_inputs.clear();
         self.inputs.clear();
+        self.states.clear();
         self.pressed_keys.clear();
         self.pressed_buttons.clear();
         self.replay = Some(Replay {
             frame: 0,
+            states: saved.states,
             input: 0,
             next_input: saved.inputs.first().map(|input| input.frames).unwrap_or(0),
             inputs: saved.inputs,
@@ -211,6 +226,14 @@ impl<T: geng::State + Tasable> Tas<T> {
             &self.queued_inputs
         };
 
+        // Sync pressed states
+        self.geng
+            .window()
+            .set_pressed_keys(self.pressed_keys.clone());
+        self.geng
+            .window()
+            .set_pressed_buttons(self.pressed_buttons.clone());
+
         // Simulate inputs
         for input in inputs {
             // Update pressed states
@@ -242,7 +265,7 @@ impl<T: geng::State + Tasable> Tas<T> {
 
         // Update inputs
         if let Some(replay) = &mut self.replay {
-            if replay.input < replay.inputs.len() {
+            if replay.frame < replay.states.len() {
                 // Get next input
                 replay.next_input = replay.next_input.saturating_sub(1);
                 if replay.next_input == 0 {
@@ -251,6 +274,9 @@ impl<T: geng::State + Tasable> Tas<T> {
                         replay.next_input = next.frames;
                     }
                 }
+
+                // Next state
+                self.game.load(replay.states[replay.frame].clone());
 
                 replay.frame += 1;
             }
@@ -264,11 +290,14 @@ impl<T: geng::State + Tasable> Tas<T> {
                 // Create new input
                 self.inputs.push(FrameInput { frames: 1, inputs });
             }
+
+            self.states.push(self.game.save());
         }
 
         // Update
         self.game.update(self.fixed_delta_time);
         self.game.fixed_update(self.fixed_delta_time);
+
         self.frame += 1;
     }
 }
@@ -299,12 +328,14 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
         } = event
         {
             self.auto_paused = true;
+            return;
         }
         if let geng::Event::KeyUp {
             key: geng::Key::LAlt,
         } = event
         {
             self.auto_paused = false;
+            return;
         }
 
         if self.auto_paused {
@@ -314,11 +345,21 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                     geng::Key::S => {
                         self.save_run("tas.json").unwrap();
                     }
+                    geng::Key::R => {
+                        // Toggle replay
+                        if let Some(replay) = self.replay.take() {
+                            // self.inputs = replay.inputs;
+                            self.states = replay.states;
+                        } else if let Err(err) = self.load_run(&self.save_file.clone()) {
+                            log::error!("Failed to load run: {err}");
+                        }
+                        self.paused = true;
+                    }
                     geng::Key::K => {
                         self.save_state();
                     }
                     geng::Key::L if !self.saved_states.is_empty() => {
-                        self.load_state(self.saved_states.len() - 1);
+                        self.load_state(self.selected_state);
                     }
                     geng::Key::P => {
                         self.paused = !self.paused;
@@ -328,6 +369,15 @@ impl<T: geng::State + Tasable> geng::State for Tas<T> {
                     }
                     geng::Key::Right => {
                         self.time_scale += 0.05;
+                    }
+                    geng::Key::Up if !self.saved_states.is_empty() => {
+                        self.selected_state = (self.selected_state + 1)
+                            .min(self.saved_states.len().saturating_sub(1));
+                        self.load_state(self.selected_state);
+                    }
+                    geng::Key::Down if !self.saved_states.is_empty() => {
+                        self.selected_state = self.selected_state.saturating_sub(1);
+                        self.load_state(self.selected_state);
                     }
                     _ => {}
                 }
